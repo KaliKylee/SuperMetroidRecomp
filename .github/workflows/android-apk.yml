@@ -1,0 +1,71 @@
+# Build manual do APK Android (debug, instalável). Só roda pelo botão
+# "Run workflow" na aba Actions: não há gatilho de push nem de pull request.
+#
+# O código C gerado a partir da ROM (src/gen) não fica no repositório. Este
+# workflow o restaura do mesmo arquivo privado usado pelo workflow Release
+# (secret SM_GENERATED_CODE_URL + SHA-256 informado ao disparar).
+name: Android APK
+on:
+  workflow_dispatch:
+    inputs:
+      generated_sha256:
+        description: 'SHA-256 do arquivo privado com o código gerado (vazio = usar src/gen já presente no checkout)'
+        type: string
+        required: false
+        default: ''
+concurrency:
+  group: supermetroid-android-apk
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore private generated program
+        env:
+          INPUT_URL: ${{ secrets.SM_GENERATED_CODE_URL }}
+          INPUT_SHA256: ${{ inputs.generated_sha256 }}
+        run: |
+          set -euo pipefail
+          if [[ -f src/gen/dispatch_v2.c && -f src/gen/module_v2.c ]]; then
+            echo "src/gen já está presente; nada a restaurar."
+            exit 0
+          fi
+          [[ -n "$INPUT_URL" ]] || { echo "::error::Defina/renove o secret SM_GENERATED_CODE_URL antes de rodar."; exit 1; }
+          [[ "$INPUT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::Informe o SHA-256 (64 hex) do arquivo gerado."; exit 1; }
+          curl --fail --silent --show-error --location "$INPUT_URL" --output "$RUNNER_TEMP/sm-generated.tar.gz"
+          python3 tools/release_payload.py restore "$RUNNER_TEMP/sm-generated.tar.gz" --sha256 "$INPUT_SHA256"
+          rm "$RUNNER_TEMP/sm-generated.tar.gz"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Setup Android SDK/NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0 ndk;26.3.11579264 cmake;3.22.1'
+
+      - name: Fetch pinned SDL2 (source + Java glue)
+        run: bash android/fetch_sdl.sh
+
+      - name: Build debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supermetroid-android-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
